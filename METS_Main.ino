@@ -47,7 +47,7 @@ bool Alarm(bool mode);
 
 void setup() {
   Serial.begin(9600);
-
+  delay(100);
   //Initialize LED
   pinMode(LEDR, OUTPUT);
   pinMode(LEDG, OUTPUT);
@@ -79,7 +79,7 @@ void setup() {
   //Serial.println("LCD Initialized");
 
   //test if magnetometer is initalized
-  if (!lis3mdl.begin_I2C(0x1E) || !lis3mdl.begin_I2C(0x1C)){
+  if (!lis3mdl.begin_I2C(0x1E) && !lis3mdl.begin_I2C(0x1C)){
     //Serial.println("Failed to find LIS3MDL chip");
     digitalWrite(LEDR, HIGH);
     digitalWrite(LEDB, LOW);
@@ -91,9 +91,9 @@ void setup() {
     //while (1) { delay(10); }
     }
    //Initialization Options
-  lis3mdl.setPerformanceMode(LIS3MDL_MEDIUMMODE);
+  lis3mdl.setPerformanceMode(LIS3MDL_ULTRAHIGHMODE);
   lis3mdl.setOperationMode(LIS3MDL_CONTINUOUSMODE);
-  lis3mdl.setDataRate(LIS3MDL_DATARATE_155_HZ);
+  lis3mdl.setDataRate(LIS3MDL_DATARATE_10_HZ);
   lis3mdl.setRange(LIS3MDL_RANGE_4_GAUSS);
   lis3mdl.setIntThreshold(500);
   lis3mdl.configInterrupt(false, false, true, // enable z axis
@@ -187,13 +187,14 @@ float Heading(){
   }
   //print readings to serial
   //Serial.print(heading); Serial.print(","); Serial.print(lis3mdl.x); Serial.print(","); Serial.print(lis3mdl.y); Serial.print(",");
+  //Serial.print("heading: " + String(heading) + ", x: " + String(lis3mdl.x) + ", y: " + String(lis3mdl.y) + ", z: " + String(lis3mdl.z) + "\n");
   return heading;
 }
 float Calibration() {
 
   //initialize local variables
   float Sum = 0;
-  int loop = 1000;
+  int loop = 100;
   float heading = 0;
   //Count the number of bad readings
   int BadReading = 0;
@@ -211,15 +212,31 @@ float Calibration() {
   lcd.print("Calibrating");
   delay(2000);
 
+  Serial.println("Heading, Average, Difference");
+
   // loop is still being tested to see the optimal sample size to get a good average
   // loop still needs a way to throw away bad readings during calibration
   for(int i = 0; i < loop; ++i) {
     heading = Heading();
+    if (i < 10){
+      Sum += heading;
+      continue; // Skip first few headings
+    }
     //After the first loop if there is a reading that differs by more than one get rid of the reading
-    if(i > 0 && (heading - (Sum/i) >= 2 || (Sum/i) - heading >= 2)) {
+    float average = (i == 0) ? heading : (Sum / i);
+    //Serial.print("Heading: ");
+    Serial.print(heading);
+    Serial.print(", ");
+    //Serial.print(" | Average: ");
+    Serial.print(average);
+    Serial.print(", ");
+    //Serial.print(" | Difference: ");
+    Serial.println(abs(heading - average));
+    if(i > 0 && abs(heading - average) >= 2) {
       //Keep track of the readings that are thrown away and throw away the reading
       ++BadReading;
-      heading = 0;
+      //heading = 0;
+      
     }
     Sum = Sum + heading;
     //Delay is needed to make sure the Magnetometer has enough time
