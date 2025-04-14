@@ -3,6 +3,7 @@
 #include <Adafruit_LIS3MDL.h>
 #include <Adafruit_Sensor.h>
 #include <LiquidCrystal_I2C.h>
+#include <math.h>
 
 //Initialize i2C address and size of LCD screen
 LiquidCrystal_I2C lcd(0x27, 16, 2); //sets I2C pin to 0x27 and tells it 2 rows by 16 columns
@@ -30,7 +31,21 @@ const int LEDB = 6;
 //NOTE: LED is inverted meaning the color you want to show up is the color grounded.
 
 const float pi = 3.1415926535897932384626433832795;
-float Average = -1;
+//float Average = -1;
+
+float hardOffsetX = -12.99;
+float hardOffsetY = 17.07;
+float hardOffsetZ = -33.40;
+
+float phiAverage = -1000;
+float thetaAverage = -1000;
+float rAverage = -1000;
+
+float test_phiAverage = -1000;
+float test_thetaAverage = -1000;
+float test_rAverage = -1000;
+
+
 
 //when the failure boolean is set to true that means there was an error in testing
 //when the failure boolean is set to false that means everything is working properly
@@ -44,6 +59,25 @@ float Calibration();
 bool Test(float Avg);
 float Heading();
 bool Alarm(bool mode);
+void printStats(double r, double theta, double phi, double rAvg, double thetaAvg, double phiAvg, bool printHeader = false);
+void cartesianToSpherical(double* r, double* theta, double* phi);
+void newCalibration();
+void lcdDisplay(int mode, float args[]);
+void newTest();
+
+enum SystemState{
+  WAITING,
+  CALIBRATING,
+  TESTING,
+  ERROR
+};
+
+SystemState state = WAITING;
+bool prevCalButton = true;
+bool prevTestButton = true;
+unsigned long lastDisplayTime = 0;
+unsigned long lastCompassUpdate = 0;
+const unsigned long compassUpdateInterval = 1000; // ms
 
 void setup() {
   Serial.begin(9600);
@@ -84,10 +118,7 @@ void setup() {
     digitalWrite(LEDR, HIGH);
     digitalWrite(LEDB, LOW);
     digitalWrite(LEDG, HIGH);
-    lcd.setCursor(0, 0);
-    lcd.print("LIS3MDL not");
-    lcd.setCursor(0, 1);
-    lcd.print("found");
+    lcdDisplay(1, nullptr);
     //while (1) { delay(10); }
     }
    //Initialization Options
@@ -107,98 +138,285 @@ void setup() {
   digitalWrite(LEDG, LOW);
 
   Alarm(0);
-  lcd.print("Ready to callibrate.");
+  //lcdDisplay(2, nullptr);
 }
+
 void loop() {
+  // Read buttons (with INPUT_PULLUP logic: LOW = pressed)
+  bool calPressed = !digitalRead(CalibrationButton);
+  bool testPressed = !digitalRead(TestButton);
 
-  //Read the buttons
-  CalibrationState = digitalRead(CalibrationButton);
-  TestState = digitalRead(TestButton);
+  // Detect button press events (LOW transition)
+  bool calJustPressed = (calPressed && prevCalButton == false);
+  bool testJustPressed = (testPressed && prevTestButton == false);
 
-  if(!CalibrationState){
-    //start callibration and get average reading
-    Average = Calibration();
-  }
-  //Extra qualifier of Average being non-zero so you have to go into the calibration state before test state
-  if(Average > 0 && !TestState) {
+  prevCalButton = !calPressed;  // Save inverted logic
+  prevTestButton = !testPressed;
 
-    //Update LED and LCD to indicate the Testing Phase
-    digitalWrite(LEDR, HIGH);
-    digitalWrite(LEDB, LOW);
-    digitalWrite(LEDG, HIGH);
+  switch (state) {
 
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("Testing");
-    
-    //Serial.println("Entered Test phase.");
-    TestFailure = Test(Average);
-    //check if testing failed
-    if(TestFailure) {
-      lcd.setCursor(0,1);
-      lcd.print("Failed");
-      digitalWrite(LEDR, LOW);
-      digitalWrite(LEDB, HIGH);
-      digitalWrite(LEDG, HIGH);
-    }
-    else {
-      //if testing worked properly
+    case WAITING:
+      if (calPressed) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Calibrating...");
+        state = CALIBRATING;
+
+        // Reset Averages
+        phiAverage = -1000;
+        thetaAverage = -1000;
+        rAverage = -1000;
+
+        test_phiAverage = -1000;
+        test_thetaAverage = -1000;
+        test_rAverage = -1000;
+
+      } else if (testPressed && thetaAverage > -1000) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Testing...");
+        state = TESTING;
+      } else if (testPressed && thetaAverage == -1000) {
+        state = ERROR;
+        lastDisplayTime = millis();
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Calibrate First");
+        Alarm(0);
+      } else if (test_thetaAverage > -1000){ // Show Test Results
+        if (millis() - lastCompassUpdate >= compassUpdateInterval) {
+          lastCompassUpdate = millis();
+          lcdDisplay(7, nullptr);
+        }
+      } else if (thetaAverage > -1000){ // Calibration Complete, Show Averages Computed
+        // Only update LCD every 1000 ms
+        if (millis() - lastCompassUpdate >= compassUpdateInterval) {
+          lastCompassUpdate = millis();
+          lcdDisplay(6, nullptr);
+        }
+      } else{ // Show current data from magnetometer
+        // Only update LCD every 1000 ms
+        if (millis() - lastCompassUpdate >= compassUpdateInterval) {
+          lastCompassUpdate = millis();
+
+          double theta, phi, r;
+          cartesianToSpherical(&r, &theta, &phi);
+          float args[] = {theta, phi, r};
+          lcdDisplay(5, args);
+        }
+      }
+      break;
+
+    case CALIBRATING:
+      newCalibration();  // Blocking call assumed
       lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Calibrated!");
+      delay(1000);  // Optional pause to show success
+      state = WAITING;
+      break;
+
+    case TESTING:
+      //TestFailure = Test(Average);
+      NewTest();
+
+      /*
+      if (TestFailure) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Test Failed");
+        digitalWrite(LEDR, LOW);
+        digitalWrite(LEDB, HIGH);
+        digitalWrite(LEDG, HIGH);
+      } else {
+        double theta, phi, r;
+        cartesianToSpherical(&r, &theta, &phi);
+        float args[] = {theta, phi, r};
+        lcdDisplay(4, args);
+        digitalWrite(LEDR, HIGH);
+        digitalWrite(LEDB, HIGH);
+        digitalWrite(LEDG, LOW);
+      }
+      */
+      delay(1500);  // Briefly show results
+      state = WAITING;
+      break;
+
+    case ERROR:
+      if (millis() - lastDisplayTime > 3000) {
+        // Show standby info after brief error message
+        double theta, phi, r;
+        cartesianToSpherical(&r, &theta, &phi);
+        float args[] = {theta, phi, r};
+        lcdDisplay(5, args);
+        state = WAITING;
+      }
+      break;
+  }
+}
+
+void lcdDisplay(int mode, float* args) {
+  lcd.clear();
+
+  switch (mode){
+    case 0:
+      lcd.setCursor(0, 0);
+      lcd.print("Theta:");
+      lcd.print(args[0], 1);
+      lcd.print("  ");
+
+      lcd.setCursor(0, 1);
+      lcd.print("Phi:");
+      lcd.print(args[1], 1);
+      lcd.print("  R:");
+      lcd.print(args[2], 0);
+    break;
+
+    case 1:
+      lcd.setCursor(0, 0);
+      lcd.print("LIS3MDL not");
+      lcd.setCursor(0, 1);
+      lcd.print("found");
+    break;
+
+    case 2:
+      lcd.setCursor(0, 0);
+      lcd.print("Ready to");
+      lcd.setCursor(0, 1);
+      lcd.print("Calibrate");
+    break;
+
+    case 3:
+      lcd.setCursor(0, 0);
+      lcd.print("Calibrating");
+    break;
+
+    case 4:
       lcd.setCursor(0,0);
       lcd.print("Ready to test.");
 
-      digitalWrite(LEDR, HIGH);
-      digitalWrite(LEDB, HIGH);
-      digitalWrite(LEDG, LOW);
-    }
-  }
+      lcd.setCursor(0, 1);
+      lcd.print("t:");
+      lcd.print(args[0], 0);  // theta
 
-  else if (!TestState) { //Check to see if the button is being pressed before it should be
-    analogWrite(AnalogVoltageOut, SVoltage);
-    //An Error message if the button is pressed before the average is calculated
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("Calibrate First");
-    Alarm(0);
-    digitalWrite(LEDR, HIGH);
-    digitalWrite(LEDB, LOW);
-    digitalWrite(LEDG, HIGH);
-    //delay so the message appears for ample amount of time to be read
-    delay(5000);
-    //Resume normal message waiting for instructions
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("Ready to calibrate.");
-    
-    digitalWrite(LEDR, HIGH);
-    digitalWrite(LEDB, HIGH);
-    digitalWrite(LEDG, LOW);
+      lcd.print(" p:");
+      lcd.print(args[1], 0);  // phi
 
+      lcd.print(" r:");
+      lcd.print(args[2], 0);  // r
+    break;
+
+    case 5:
+      lcd.setCursor(0,0);
+      lcd.print("Calibrate Ready");
+
+      lcd.setCursor(0, 1);
+      lcd.print("t:");
+      lcd.print(args[0], 0);  // theta
+
+      lcd.print(" p:");
+      lcd.print(args[1], 0);  // phi
+
+      lcd.print(" r:");
+      lcd.print(args[2], 0);  // r
+    break;
+
+    case 6:
+      lcd.setCursor(0,0);
+      lcd.print("Test Ready");
+
+      lcd.setCursor(0, 1);
+      lcd.print("t:");
+      lcd.print(thetaAverage, 0);  // theta
+
+      lcd.print(" p:");
+      lcd.print(phiAverage, 0);  // phi
+
+      lcd.print(" r:");
+      lcd.print(rAverage, 0);  // r
+    break;
+
+    case 7:
+      lcd.setCursor(0, 0);
+      lcd.print("t0:");
+      lcd.print(thetaAverage, 1);   // Always 1 decimal
+
+      lcd.print(" p0:");
+      lcd.print(phiAverage, 1);
+
+      lcd.setCursor(0, 1);
+      lcd.print("t1:");
+      lcd.print(test_thetaAverage, 1);
+
+      lcd.print(" p1:");
+      lcd.print(test_phiAverage, 1);
+    break;
+
+    case 8:
+      lcd.setCursor(0, 0);
+      lcd.print("Test Complete!");
+    break;
+
+    default:
+      lcd.setCursor(0, 0);
+      lcd.print("Invalid mode");
+    break;
   }
 }
-float Heading(){
-  lis3mdl.read();
-  float heading = 0;
-  if(lis3mdl.x == 0 && lis3mdl.y == 0){
-    exit;
-  }
-  else{
-    heading = -((atan2(lis3mdl.y,lis3mdl.x) * 180) / pi)+180;
-  }
-  //print readings to serial
-  //Serial.print(heading); Serial.print(","); Serial.print(lis3mdl.x); Serial.print(","); Serial.print(lis3mdl.y); Serial.print(",");
-  //Serial.print("heading: " + String(heading) + ", x: " + String(lis3mdl.x) + ", y: " + String(lis3mdl.y) + ", z: " + String(lis3mdl.z) + "\n");
-  return heading;
-}
-float Calibration() {
 
-  //initialize local variables
-  float Sum = 0;
+void printStats(double r, double theta, double phi, double rAvg, double thetaAvg, double phiAvg, bool printHeader = false){
+  if(printHeader){
+    Serial.println("Strength of field (r), Average strength of field (rAvg), Difference in strength of field (r - rAvg), Theta (theta), Average theta (thetaAvg), Difference in theta (theta - thetaAvg), Phi (phi), Average phi (phiAvg), Difference in phi (phi - phiAvg)");
+    return;
+  }
+  
+  Serial.print(r);
+  Serial.print(", ");
+  Serial.print(rAvg);
+  Serial.print(", ");
+  Serial.print(abs(r - rAvg));
+  Serial.print(", ");
+
+  Serial.print(theta);
+  Serial.print(", ");
+  Serial.print(thetaAvg);
+  Serial.print(", ");
+  Serial.print(abs(theta - thetaAvg));
+  Serial.print(", ");
+
+  Serial.print(phi);
+  Serial.print(", ");
+  Serial.print(phiAvg);
+  Serial.print(", ");
+  Serial.println(abs(phi - phiAvg));
+}
+
+void cartesianToSpherical(double* r, double* theta, double* phi){
+
+  sensors_event_t event;
+  lis3mdl.getEvent(&event);
+  //Serial.print(event.magnetic.x);
+  //Serial.print("| ");
+  //Serial.print(event.magnetic.y);
+  //Serial.print("| ");
+  //Serial.println(event.magnetic.z);
+
+  float x = event.magnetic.x - hardOffsetX;
+  float y = event.magnetic.y - hardOffsetY;
+  float z = event.magnetic.z - hardOffsetZ;  
+
+  *r = sqrt(x * x + y * y + z * z); // Strength of Magnetic Field
+  *theta = atan2(y, x) * RAD_TO_DEG;
+  if (*theta < 0) *theta += 360; // Normalize to 0-360
+  *phi = asin(z / *r) * (180 / pi);
+}
+
+void newCalibration(){
+  double rSum = 0, thetaSum = 0, phiSum = 0;
   int loop = 100;
-  float heading = 0;
-  //Count the number of bad readings
-  int BadReading = 0;
-  Average = 0;
+  double r, theta, phi, rAvg, thetaAvg, phiAvg;
+
+  int badReading = 0;
 
   //Implement LED Calibration colors.
   digitalWrite(LEDR, HIGH);
@@ -207,67 +425,77 @@ float Calibration() {
   //Reset the Average everytime this state is entered
   
   //Indicate Calibration State on LCD
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("Calibrating");
+  lcdDisplay(3, nullptr);
   delay(2000);
 
-  Serial.println("Heading, Average, Difference");
+  printStats(r, theta, phi, rAvg, thetaAvg, phiAvg, true);
 
-  // loop is still being tested to see the optimal sample size to get a good average
-  // loop still needs a way to throw away bad readings during calibration
-  for(int i = 0; i < loop; ++i) {
-    heading = Heading();
-    if (i < 10){
-      Sum += heading;
-      continue; // Skip first few headings
-    }
-    //After the first loop if there is a reading that differs by more than one get rid of the reading
-    float average = (i == 0) ? heading : (Sum / i);
-    //Serial.print("Heading: ");
-    Serial.print(heading);
-    Serial.print(", ");
-    //Serial.print(" | Average: ");
-    Serial.print(average);
-    Serial.print(", ");
-    //Serial.print(" | Difference: ");
-    Serial.println(abs(heading - average));
-    if(i > 0 && abs(heading - average) >= 2) {
-      //Keep track of the readings that are thrown away and throw away the reading
-      ++BadReading;
-      //heading = 0;
-      
-    }
-    Sum = Sum + heading;
-    //Delay is needed to make sure the Magnetometer has enough time
-    delay(10);
+  for(int i = 0; i < 10; i++){
+    cartesianToSpherical(&r, &theta, &phi); // Warm device up, throw away potential garbage values
   }
-  if(BadReading > loop/10) {
-    //Notify that Calibration had too many outliers
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("Calibration");
-    lcd.setCursor(0,1);
-    lcd.print("Failed");
-    Alarm(1);
-    digitalWrite(LEDR, LOW);
-    digitalWrite(LEDB, HIGH);
-    digitalWrite(LEDG, HIGH);
-    return -1;
+
+  for(int i = 0; i < loop; i++){
+    cartesianToSpherical(&r, &theta, &phi);
+
+    rSum += r;
+    thetaSum += theta;
+    phiSum += phi;
+
+    rAvg = rSum / (i + 1);
+    thetaAvg = thetaSum / (i + 1);
+    phiAvg = phiSum / (i + 1);
+
+    //if(i > 0 && abs(heading - average) >= 2){
+    //  // Bad Reading
+    //  ++badReading;
+    //}
+
+    printStats(r, theta, phi, rAvg, thetaAvg, phiAvg);
+    float args[] = {thetaAvg, phiAvg, rAvg};
+    lcdDisplay(0, args);
+    delay(100);
   }
-  else {
-    //Reset the LCD to show we have left calibration state
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("Ready");
-      
-    //Reset the LED to show we have left the calibration state
-    digitalWrite(LEDR, HIGH);
-    digitalWrite(LEDB, HIGH);
-    digitalWrite(LEDG, LOW);
-    return Sum / (loop - BadReading);
+  thetaAverage = thetaAvg;
+  phiAverage = phiAvg;
+  rAverage = rAvg;
+}
+
+void NewTest(){
+  int loop = 100;
+  double rSum = 0, thetaSum = 0, phiSum = 0;
+  double r, theta, phi;
+
+  printStats(0, 0, 0, 0, 0, 0, true);
+
+  for(int i = 0; i < 10; i++){
+    cartesianToSpherical(&r, &theta, &phi); // Warm device up, throw away potential garbage values
+  }
+
+  for(int i = 0; i < loop; i++){
+    cartesianToSpherical(&r, &theta, &phi);
+
+    rSum += r;
+    thetaSum += theta;
+    phiSum += phi;
+
+    test_rAverage = rSum / (i + 1);
+    test_thetaAverage = thetaSum / (i + 1);
+    test_phiAverage = phiSum / (i + 1);
+
+    printStats(r, theta, phi, test_rAverage, test_thetaAverage, test_phiAverage);
+    //float args[] = {test_thetaAverage, test_phiAverage, test_rAverage};
+    lcdDisplay(7, nullptr);
+
+    if(abs(test_thetaAverage - thetaAverage) >= 1 || abs(test_phiAverage - phiAverage) >= 1){
+      lcdDisplay(8, nullptr);
+      delay(2000);
+      lcdDisplay(7, nullptr);
+      break;
+    }
+    delay(100);
   }
 }
+
 bool Test(float Avg) {
   float deflection = 1;
   float heading = 0;
