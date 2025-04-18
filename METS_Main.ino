@@ -33,9 +33,15 @@ const int LEDB = 6;
 const float pi = 3.1415926535897932384626433832795;
 //float Average = -1;
 
-float hardOffsetX = -12.99;
-float hardOffsetY = 17.07;
-float hardOffsetZ = -33.40;
+float hardOffsetX = -6.97;
+float hardOffsetY = 38.33;
+float hardOffsetZ = -34.96;
+
+float softIron[3][3] = {
+  {1.001,  0.038, -0.021},
+  {0.038,  0.991,  0.004},
+  {-0.021, 0.001,  1.011}
+};
 
 float phiAverage = -1000;
 float thetaAverage = -1000;
@@ -63,7 +69,7 @@ void printStats(double r, double theta, double phi, double rAvg, double thetaAvg
 void cartesianToSpherical(double* r, double* theta, double* phi);
 void newCalibration();
 void lcdDisplay(int mode, float args[]);
-void newTest();
+void Test();
 
 enum SystemState{
   WAITING,
@@ -217,27 +223,8 @@ void loop() {
       break;
 
     case TESTING:
-      //TestFailure = Test(Average);
-      NewTest();
+      Test();
 
-      /*
-      if (TestFailure) {
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Test Failed");
-        digitalWrite(LEDR, LOW);
-        digitalWrite(LEDB, HIGH);
-        digitalWrite(LEDG, HIGH);
-      } else {
-        double theta, phi, r;
-        cartesianToSpherical(&r, &theta, &phi);
-        float args[] = {theta, phi, r};
-        lcdDisplay(4, args);
-        digitalWrite(LEDR, HIGH);
-        digitalWrite(LEDB, HIGH);
-        digitalWrite(LEDG, LOW);
-      }
-      */
       delay(1500);  // Briefly show results
       state = WAITING;
       break;
@@ -257,10 +244,10 @@ void loop() {
 
 void lcdDisplay(int mode, float* args) {
   lcd.clear();
+  lcd.setCursor(0, 0);
 
   switch (mode){
     case 0:
-      lcd.setCursor(0, 0);
       lcd.print("Theta:");
       lcd.print(args[0], 1);
       lcd.print("  ");
@@ -273,26 +260,22 @@ void lcdDisplay(int mode, float* args) {
     break;
 
     case 1:
-      lcd.setCursor(0, 0);
       lcd.print("LIS3MDL not");
       lcd.setCursor(0, 1);
       lcd.print("found");
     break;
 
     case 2:
-      lcd.setCursor(0, 0);
       lcd.print("Ready to");
       lcd.setCursor(0, 1);
       lcd.print("Calibrate");
     break;
 
     case 3:
-      lcd.setCursor(0, 0);
       lcd.print("Calibrating");
     break;
 
     case 4:
-      lcd.setCursor(0,0);
       lcd.print("Ready to test.");
 
       lcd.setCursor(0, 1);
@@ -307,7 +290,6 @@ void lcdDisplay(int mode, float* args) {
     break;
 
     case 5:
-      lcd.setCursor(0,0);
       lcd.print("Calibrate Ready");
 
       lcd.setCursor(0, 1);
@@ -322,7 +304,6 @@ void lcdDisplay(int mode, float* args) {
     break;
 
     case 6:
-      lcd.setCursor(0,0);
       lcd.print("Test Ready");
 
       lcd.setCursor(0, 1);
@@ -337,7 +318,6 @@ void lcdDisplay(int mode, float* args) {
     break;
 
     case 7:
-      lcd.setCursor(0, 0);
       lcd.print("t0:");
       lcd.print(thetaAverage, 1);   // Always 1 decimal
 
@@ -346,10 +326,10 @@ void lcdDisplay(int mode, float* args) {
 
       lcd.setCursor(0, 1);
       lcd.print("t1:");
-      lcd.print(test_thetaAverage, 1);
+      lcd.print(args[0], 1);
 
       lcd.print(" p1:");
-      lcd.print(test_phiAverage, 1);
+      lcd.print(args[1], 1);
     break;
 
     case 8:
@@ -366,7 +346,7 @@ void lcdDisplay(int mode, float* args) {
 
 void printStats(double r, double theta, double phi, double rAvg, double thetaAvg, double phiAvg, bool printHeader = false){
   if(printHeader){
-    Serial.println("Strength of field (r), Average strength of field (rAvg), Difference in strength of field (r - rAvg), Theta (theta), Average theta (thetaAvg), Difference in theta (theta - thetaAvg), Phi (phi), Average phi (phiAvg), Difference in phi (phi - phiAvg)");
+    Serial.println("(r), (rAvg), (r - rAvg), (theta), (thetaAvg), (theta - thetaAvg), (phi), (phiAvg), (phi - phiAvg)");
     return;
   }
   
@@ -390,25 +370,34 @@ void printStats(double r, double theta, double phi, double rAvg, double thetaAvg
   Serial.print(", ");
   Serial.println(abs(phi - phiAvg));
 }
+// Define these globally or as static inside the function
+float xEMA = 0, yEMA = 0, zEMA = 0;  // Running smoothed values
+float alpha = 0.05;  // Smoothing factor (adjust as needed)
 
 void cartesianToSpherical(double* r, double* theta, double* phi){
-
   sensors_event_t event;
   lis3mdl.getEvent(&event);
-  //Serial.print(event.magnetic.x);
-  //Serial.print("| ");
-  //Serial.print(event.magnetic.y);
-  //Serial.print("| ");
-  //Serial.println(event.magnetic.z);
 
-  float x = event.magnetic.x - hardOffsetX;
-  float y = event.magnetic.y - hardOffsetY;
-  float z = event.magnetic.z - hardOffsetZ;  
+  // Apply hard iron correction
+  float rawX = event.magnetic.x - hardOffsetX;
+  float rawY = event.magnetic.y - hardOffsetY;
+  float rawZ = event.magnetic.z - hardOffsetZ;
 
-  *r = sqrt(x * x + y * y + z * z); // Strength of Magnetic Field
-  *theta = atan2(y, x) * RAD_TO_DEG;
-  if (*theta < 0) *theta += 360; // Normalize to 0-360
-  *phi = asin(z / *r) * (180 / pi);
+  // Apply soft iron matrix
+  float xRawCorrected = softIron[0][0]*rawX + softIron[0][1]*rawY + softIron[0][2]*rawZ;
+  float yRawCorrected = softIron[1][0]*rawX + softIron[1][1]*rawY + softIron[1][2]*rawZ;
+  float zRawCorrected = softIron[2][0]*rawX + softIron[2][1]*rawY + softIron[2][2]*rawZ;
+
+  // === Apply EMA filtering ===
+  xEMA = alpha * xRawCorrected + (1 - alpha) * xEMA;
+  yEMA = alpha * yRawCorrected + (1 - alpha) * yEMA;
+  zEMA = alpha * zRawCorrected + (1 - alpha) * zEMA;
+
+  // Use filtered values for heading calculation
+  *r = sqrt(xEMA * xEMA + yEMA * yEMA + zEMA * zEMA);
+  *theta = atan2(yEMA, xEMA) * RAD_TO_DEG;
+  if (*theta < 0) *theta += 360;
+  *phi = asin(zEMA / *r) * RAD_TO_DEG;
 }
 
 void newCalibration(){
@@ -417,6 +406,9 @@ void newCalibration(){
   double r, theta, phi, rAvg, thetaAvg, phiAvg;
 
   int badReading = 0;
+
+  double rEMA = 0, thetaEMA = 0, phiEMA = 0;
+  float alpha = 0.1;
 
   //Implement LED Calibration colors.
   digitalWrite(LEDR, HIGH);
@@ -445,11 +437,6 @@ void newCalibration(){
     thetaAvg = thetaSum / (i + 1);
     phiAvg = phiSum / (i + 1);
 
-    //if(i > 0 && abs(heading - average) >= 2){
-    //  // Bad Reading
-    //  ++badReading;
-    //}
-
     printStats(r, theta, phi, rAvg, thetaAvg, phiAvg);
     float args[] = {thetaAvg, phiAvg, rAvg};
     lcdDisplay(0, args);
@@ -460,10 +447,12 @@ void newCalibration(){
   rAverage = rAvg;
 }
 
-void NewTest(){
+void Test(){
   int loop = 100;
   double rSum = 0, thetaSum = 0, phiSum = 0;
   double r, theta, phi;
+
+  bool endFlag = false;
 
   printStats(0, 0, 0, 0, 0, 0, true);
 
@@ -471,94 +460,25 @@ void NewTest(){
     cartesianToSpherical(&r, &theta, &phi); // Warm device up, throw away potential garbage values
   }
 
-  for(int i = 0; i < loop; i++){
+  while(!endFlag){
     cartesianToSpherical(&r, &theta, &phi);
 
-    rSum += r;
-    thetaSum += theta;
-    phiSum += phi;
+    printStats(r, theta, phi, rAverage, thetaAverage, phiAverage);
+    float args[] = {theta, phi};
+    lcdDisplay(7, args);
 
-    test_rAverage = rSum / (i + 1);
-    test_thetaAverage = thetaSum / (i + 1);
-    test_phiAverage = phiSum / (i + 1);
-
-    printStats(r, theta, phi, test_rAverage, test_thetaAverage, test_phiAverage);
-    //float args[] = {test_thetaAverage, test_phiAverage, test_rAverage};
-    lcdDisplay(7, nullptr);
-
-    if(abs(test_thetaAverage - thetaAverage) >= 1 || abs(test_phiAverage - phiAverage) >= 1){
+    if(abs(theta - thetaAverage) >= 1 || abs(phi - phiAverage) >= 1){
+      endFlag = true;
+      digitalWrite(LEDR, LOW);
+      digitalWrite(LEDB, LOW);
+      digitalWrite(LEDG, HIGH);
+      Alarm(1);
       lcdDisplay(8, nullptr);
       delay(2000);
       lcdDisplay(7, nullptr);
       break;
     }
     delay(100);
-  }
-}
-
-bool Test(float Avg) {
-  float deflection = 1;
-  float heading = 0;
-  float highest = 0;
-  float lowest = 0;
-  float testAvg = 0;
-  int loop = 10;
-  bool endFlag = true;
-  delay(2000);
-
-  heading = Heading();
-  lowest = heading;
-  highest = heading;
-
-  //loop until flag gets cleared
-  while(endFlag) {
-    testAvg = 0;
-
-    for(int i = 0; i < loop; ++i) {
-      heading = Heading();
-      delay(10);
-      //prints every 5th reading to 2 decimal numbers
-      if(i % 5 == 0){
-        lcd.setCursor(0, 1);
-        lcd.print(heading, 2);
-      }
-    }  
-    testAvg = testAvg / loop;
-
-    if(testAvg > highest) {
-      highest = testAvg;
-    }
-    else if (lowest > testAvg) {
-      lowest = testAvg;
-    }
-
-    if(highest - Avg > Avg - lowest) {
-      analogWrite(AnalogVoltageOut, 188*(highest - testAvg) + SVoltage);
-    }
-    else {
-      analogWrite(AnalogVoltageOut, 188*(testAvg - lowest) + SVoltage);
-    }
-
-    //If heading and avg differ by more than 1 clear flag and exit
-    if(highest - Avg >= deflection || Avg - lowest >= deflection) {
-      endFlag = false;
-    }
-  }
-    // Update LED and LCD to indicate the end of the Testing Phase
-  digitalWrite(LEDR, LOW);
-  digitalWrite(LEDB, LOW);
-  digitalWrite(LEDG, HIGH);
-  Alarm(1);
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Reading Complete");
-  delay(8000);
-    //Indicate if the testing was ended by an outlier
-  if(highest - testAvg > 2 || testAvg - lowest > 2) {
-    return true;
-  }
-  else {
-    return false;
   }
 }
 bool Alarm(bool mode){
