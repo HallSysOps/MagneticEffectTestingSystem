@@ -61,21 +61,20 @@ volatile bool CalibrationState = 0;
 volatile bool TestState = 0;
 
 //Functions (defined at the bottom)
-float Calibration();
-bool Test(float Avg);
-float Heading();
+void Calibration();
+void Test();
+void lcdDisplay(int mode, float args[]);
+void cartesianToSpherical(double* r, double* theta, double* phi);
+double angleDifference(double a, double b);
 bool Alarm(bool mode);
 void printStats(double r, double theta, double phi, double rAvg, double thetaAvg, double phiAvg, bool printHeader = false);
-void cartesianToSpherical(double* r, double* theta, double* phi);
-void newCalibration();
-void lcdDisplay(int mode, float args[]);
-void Test();
 
 enum SystemState{
   WAITING,
   CALIBRATING,
   TESTING,
-  ERROR
+  ERROR,
+  PYTHONAPP
 };
 
 SystemState state = WAITING;
@@ -87,6 +86,7 @@ const unsigned long compassUpdateInterval = 1000; // ms
 
 void setup() {
   Serial.begin(9600);
+  Serial.setTimeout(1);
   delay(100);
   //Initialize LED
   pinMode(LEDR, OUTPUT);
@@ -146,8 +146,10 @@ void setup() {
   Alarm(0);
   //lcdDisplay(2, nullptr);
 }
+String input = "";
 
 void loop() {
+
   // Read buttons (with INPUT_PULLUP logic: LOW = pressed)
   bool calPressed = !digitalRead(CalibrationButton);
   bool testPressed = !digitalRead(TestButton);
@@ -183,12 +185,12 @@ void loop() {
         lcd.print("Testing...");
         state = TESTING;
       } else if (testPressed && thetaAverage == -1000) {
-        state = ERROR;
-        lastDisplayTime = millis();
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Calibrate First");
-        Alarm(0);
+        state = PYTHONAPP;
+        //lastDisplayTime = millis();
+        //lcd.clear();
+        //lcd.setCursor(0, 0);
+        //lcd.print("Calibrate First");
+        //Alarm(0);
       } else if (test_thetaAverage > -1000){ // Show Test Results
         if (millis() - lastCompassUpdate >= compassUpdateInterval) {
           lastCompassUpdate = millis();
@@ -214,7 +216,7 @@ void loop() {
       break;
 
     case CALIBRATING:
-      newCalibration();  // Blocking call assumed
+      Calibration();  // Blocking call assumed
       lcd.clear();
       lcd.setCursor(0, 0);
       lcd.print("Calibrated!");
@@ -239,6 +241,20 @@ void loop() {
         state = WAITING;
       }
       break;
+    case PYTHONAPP:
+      if(calPressed){
+        state = WAITING;
+      }
+      if (millis() - lastCompassUpdate >= compassUpdateInterval) {
+          lastCompassUpdate = millis();
+          lcdDisplay(9, NULL);
+        }
+      sensors_event_t event;
+      lis3mdl.getEvent(&event);
+      Serial.print(event.magnetic.x); Serial.print(",");
+      Serial.print(event.magnetic.y); Serial.print(",");
+      Serial.println(event.magnetic.z);
+      delay(10);
   }
 }
 
@@ -333,12 +349,13 @@ void lcdDisplay(int mode, float* args) {
     break;
 
     case 8:
-      lcd.setCursor(0, 0);
       lcd.print("Test Complete!");
     break;
 
+    case 9:
+      lcd.print("PYTHON APP MODE");
+
     default:
-      lcd.setCursor(0, 0);
       lcd.print("Invalid mode");
     break;
   }
@@ -372,9 +389,10 @@ void printStats(double r, double theta, double phi, double rAvg, double thetaAvg
 }
 // Define these globally or as static inside the function
 float xEMA = 0, yEMA = 0, zEMA = 0;  // Running smoothed values
-float alpha = 0.05;  // Smoothing factor (adjust as needed)
+float alpha = 0.01;  // Smoothing factor (adjust as needed)
 
 void cartesianToSpherical(double* r, double* theta, double* phi){
+  delay(10);
   sensors_event_t event;
   lis3mdl.getEvent(&event);
 
@@ -388,6 +406,12 @@ void cartesianToSpherical(double* r, double* theta, double* phi){
   float yRawCorrected = softIron[1][0]*rawX + softIron[1][1]*rawY + softIron[1][2]*rawZ;
   float zRawCorrected = softIron[2][0]*rawX + softIron[2][1]*rawY + softIron[2][2]*rawZ;
 
+  if(xEMA == 0 || yEMA == 0 || zEMA == 0){
+    xEMA = xRawCorrected;
+    yEMA = yRawCorrected;
+    zEMA = zRawCorrected;
+  }
+
   // === Apply EMA filtering ===
   xEMA = alpha * xRawCorrected + (1 - alpha) * xEMA;
   yEMA = alpha * yRawCorrected + (1 - alpha) * yEMA;
@@ -400,15 +424,10 @@ void cartesianToSpherical(double* r, double* theta, double* phi){
   *phi = asin(zEMA / *r) * RAD_TO_DEG;
 }
 
-void newCalibration(){
+void Calibration(){
   double rSum = 0, thetaSum = 0, phiSum = 0;
   int loop = 100;
   double r, theta, phi, rAvg, thetaAvg, phiAvg;
-
-  int badReading = 0;
-
-  double rEMA = 0, thetaEMA = 0, phiEMA = 0;
-  float alpha = 0.1;
 
   //Implement LED Calibration colors.
   digitalWrite(LEDR, HIGH);
@@ -440,7 +459,6 @@ void newCalibration(){
     printStats(r, theta, phi, rAvg, thetaAvg, phiAvg);
     float args[] = {thetaAvg, phiAvg, rAvg};
     lcdDisplay(0, args);
-    delay(100);
   }
   thetaAverage = thetaAvg;
   phiAverage = phiAvg;
@@ -451,7 +469,6 @@ void Test(){
   int loop = 100;
   double rSum = 0, thetaSum = 0, phiSum = 0;
   double r, theta, phi;
-
   bool endFlag = false;
 
   printStats(0, 0, 0, 0, 0, 0, true);
@@ -467,7 +484,10 @@ void Test(){
     float args[] = {theta, phi};
     lcdDisplay(7, args);
 
-    if(abs(theta - thetaAverage) >= 1 || abs(phi - phiAverage) >= 1){
+    double thetaDiff = angleDifference(theta, thetaAverage);
+    double phiDiff = fabs(phi - phiAverage);
+
+    if(thetaDiff >= 1 || phiDiff >= 1){
       endFlag = true;
       digitalWrite(LEDR, LOW);
       digitalWrite(LEDB, LOW);
@@ -478,9 +498,13 @@ void Test(){
       lcdDisplay(7, nullptr);
       break;
     }
-    delay(100);
   }
 }
+double angleDifference(double a, double b) {
+  double diff = fmod(a - b + 540.0, 360.0) - 180.0;
+  return fabs(diff);
+}
+
 bool Alarm(bool mode){
   //starts the alarm. if mode = 0, the alarm beeps 3 times.
   if(mode == 0){
