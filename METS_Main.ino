@@ -51,7 +51,36 @@ float test_phiAverage = -1000;
 float test_thetaAverage = -1000;
 float test_rAverage = -1000;
 
+typedef struct {
+    float x_hat;  // Estimated value
+    float P;      // Estimate covariance
+    float Q;      // Process noise covariance
+    float R;      // Measurement noise covariance
+} KalmanFilter1D;
 
+KalmanFilter1D kf_x, kf_y, kf_z;
+
+void KalmanFilter_Init(KalmanFilter1D* kf, float process_noise, float measurement_noise, float initial_value) {
+    kf->x_hat = initial_value;
+    kf->P = 1.0f;
+    kf->Q = process_noise;
+    kf->R = measurement_noise;
+}
+
+float KalmanFilter_Update(KalmanFilter1D* kf, float measurement) {
+    // Prediction step
+    float x_hat_minus = kf->x_hat;
+    float P_minus = kf->P + kf->Q;
+
+    // Kalman gain
+    float K = P_minus / (P_minus + kf->R);
+
+    // Update step
+    kf->x_hat = x_hat_minus + K * (measurement - x_hat_minus);
+    kf->P = (1 - K) * P_minus;
+
+    return kf->x_hat;
+}
 
 //when the failure boolean is set to true that means there was an error in testing
 //when the failure boolean is set to false that means everything is working properly
@@ -145,6 +174,13 @@ void setup() {
 
   Alarm(0);
   //lcdDisplay(2, nullptr);
+
+  sensors_event_t event;
+  lis3mdl.getEvent(&event);
+
+  KalmanFilter_Init(&kf_x, 0.00001, 0.01, event.magnetic.x);
+  KalmanFilter_Init(&kf_y, 0.00001, 0.01, event.magnetic.y);
+  KalmanFilter_Init(&kf_z, 0.00001, 0.01, event.magnetic.z);
 }
 String input = "";
 
@@ -395,6 +431,10 @@ void cartesianToSpherical(double* r, double* theta, double* phi){
   delay(10);
   sensors_event_t event;
   lis3mdl.getEvent(&event);
+
+  float x = KalmanFilter_Update(&kf_x, event.magnetic.x);
+  float y = KalmanFilter_Update(&kf_y, event.magnetic.y);
+  float z = KalmanFilter_Update(&kf_z, event.magnetic.z);
 
   // Apply hard iron correction
   float rawX = event.magnetic.x - hardOffsetX;
